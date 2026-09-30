@@ -39,9 +39,10 @@
 
     <main id="view" tabindex="-1"></main>
 
-    <button class="fab" id="fab" aria-label="投稿する">
+    <!-- ボタンの上に透明な入力欄を重ねるので、button ではなく div にしている -->
+    <div class="fab" id="fab" role="button" tabindex="0" aria-label="投稿する">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-    </button>
+    </div>
 
     <nav class="tabbar" id="tabbar">
       <a href="#/home" data-tab="home" aria-label="ホーム">
