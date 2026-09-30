@@ -9,7 +9,7 @@ import {
   blobToDataUrl, formatBytes, localStamp, dayKey,
 } from './util.js';
 
-export const APP_VERSION = '1.1.0';
+export const APP_VERSION = '1.1.1';
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -62,6 +62,18 @@ function toast(msg, action) {
   toastTimer = setTimeout(() => t.classList.remove('show'), action ? 8000 : 2600);
 }
 
+// iOS は「タップした瞬間」に入力欄へフォーカスしないとキーボードを出してくれない。
+// そこで、タップと同時に見えないダミー入力欄へフォーカスしてキーボードを先に開き、
+// 投稿画面ができたら本物の入力欄へフォーカスを移す（キーボードは開いたまま引き継がれる）。
+const kbProxy = document.createElement('input');
+kbProxy.setAttribute('aria-hidden', 'true');
+kbProxy.tabIndex = -1;
+kbProxy.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px;border:0;padding:0;pointer-events:none;';
+document.body.appendChild(kbProxy);
+function primeKeyboard() {
+  try { kbProxy.focus({ preventScroll: true }); } catch { kbProxy.focus(); }
+}
+
 function openOverlay(html, { onClose } = {}) {
   const wrap = document.createElement('div');
   wrap.innerHTML = html;
@@ -86,6 +98,7 @@ function actionSheet(items) {
     o.el.querySelectorAll('.item').forEach(b => b.addEventListener('click', () => {
       const i = +b.dataset.i;
       chosen = i >= 0 ? items[i].value : null;
+      if (i >= 0 && items[i].keyboard) primeKeyboard(); // 編集画面を開く前にキーボードを準備
       o.close();
     }));
   });
@@ -335,7 +348,11 @@ function mountComposer(root, { text = '', images = [], parentId = null, editId =
 
   if (imgs.length) renderThumbs();
   refresh();
-  if (autofocus) setTimeout(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }, 60);
+  if (autofocus) {
+    const focusEnd = () => { ta.focus({ preventScroll: true }); ta.setSelectionRange(ta.value.length, ta.value.length); };
+    focusEnd();                       // ダミー入力欄から引き継ぐ
+    requestAnimationFrame(focusEnd);  // 念のため描画後にもう一度
+  }
 
   return {
     // キャンセル時：新しく追加しただけの画像を片付ける
@@ -350,7 +367,7 @@ async function openComposer({ parentId = null, editId = null } = {}) {
   const draftKey = !parentId && !editId ? 'draft' : null;
   if (editId) {
     const p = await db.getPost(editId);
-    if (!p) return;
+    if (!p) { kbProxy.blur(); return; }
     text = p.text; images = p.images || [];
   } else if (draftKey) {
     text = await db.getMeta(draftKey, '') || '';
@@ -436,7 +453,7 @@ async function postMenu(id) {
   const p = await db.getPost(id);
   if (!p) return;
   const choice = await actionSheet([
-    { label: '編集', value: 'edit', icon: I.edit },
+    { label: '編集', value: 'edit', icon: I.edit, keyboard: true },
     { label: 'テキストをコピー', value: 'copy', icon: I.copy },
     ...(extractUrls(p.text).length ? [{ label: 'リンク情報を再取得', value: 'refetch', icon: I.link }] : []),
     { label: '削除', value: 'delete', icon: I.trash, danger: true },
@@ -488,7 +505,7 @@ document.addEventListener('click', e => {
     case 'reply':
       e.stopPropagation();
       if (route.name === 'post' && route.params.id === id) $('.reply-box textarea')?.focus();
-      else openComposer({ parentId: id });
+      else { primeKeyboard(); openComposer({ parentId: id }); }
       break;
     case 'more':
       e.stopPropagation();
@@ -550,7 +567,7 @@ async function renderHome({ keepScroll = false, restoreY = null } = {}) {
       mountComposer($('#inlineComposer'), { text, draftKey: 'draft' });
     }
   }
-  $('#firstPost')?.addEventListener('click', () => openComposer());
+  $('#firstPost')?.addEventListener('click', () => { primeKeyboard(); openComposer(); });
   if (keepScroll) scrollTo(0, y);
   else if (restoreY) scrollTo(0, restoreY);
   hydrateImages();
@@ -1225,7 +1242,7 @@ function registerSW() {
 async function boot() {
   profile = { ...profile, ...(await db.getMeta('profile', {})) };
   applyLook(await getLook());
-  $('#fab').addEventListener('click', () => openComposer());
+  $('#fab').addEventListener('click', () => { primeKeyboard(); openComposer(); });
   wide.addEventListener('change', () => route.name === 'home' && renderHome());
   await render();
   renderSyncBtn();
