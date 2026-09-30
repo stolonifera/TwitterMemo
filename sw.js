@@ -1,6 +1,6 @@
 // Service Worker：アプリ本体をキャッシュしてオフラインで起動できるようにする
 // アプリを更新したら VERSION を変えること（キャッシュが入れ替わる）
-const VERSION = 'v1.1.1';
+const VERSION = 'v1.1.2';
 const CACHE = `hitokoto-${VERSION}`;
 const SHELL = [
   './',

@@ -9,7 +9,7 @@ import {
   blobToDataUrl, formatBytes, localStamp, dayKey,
 } from './util.js';
 
-export const APP_VERSION = '1.1.1';
+export const APP_VERSION = '1.1.2';
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -62,17 +62,41 @@ function toast(msg, action) {
   toastTimer = setTimeout(() => t.classList.remove('show'), action ? 8000 : 2600);
 }
 
-// iOS は「タップした瞬間」に入力欄へフォーカスしないとキーボードを出してくれない。
-// そこで、タップと同時に見えないダミー入力欄へフォーカスしてキーボードを先に開き、
-// 投稿画面ができたら本物の入力欄へフォーカスを移す（キーボードは開いたまま引き継がれる）。
-const kbProxy = document.createElement('input');
-kbProxy.setAttribute('aria-hidden', 'true');
-kbProxy.tabIndex = -1;
-kbProxy.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px;border:0;padding:0;pointer-events:none;';
-document.body.appendChild(kbProxy);
-function primeKeyboard() {
-  try { kbProxy.focus({ preventScroll: true }); } catch { kbProxy.focus(); }
-}
+// ---------- 投稿画面を開いたときに、すぐキーボードを出すしくみ ----------
+// iPhone では、JavaScript から入力欄にフォーカスしてもキーボードが出るとは限らない
+// （Safari は出すが、Chrome など Safari 以外のブラウザは出さないことがある）。
+// そこで、＋ボタンや返信ボタンの上に「透明な入力欄」を重ねておく。
+// 指はこの入力欄を直接タップするので、どのブラウザでも普通にキーボードが開く。
+// そのタップの処理の中で投稿画面を作り、本物の入力欄へフォーカスを移す（キーボードは開いたまま）。
+const kbCatch = (kind, id = '') =>
+  `<textarea class="kb-catch" data-kb="${kind}"${id ? ` data-id="${esc(id)}"` : ''} tabindex="-1" aria-hidden="true" rows="1" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>`;
+
+// 透明な入力欄をタップすると、同じタップの click が少しあとに届く。
+// 投稿画面の下にあったボタンが押されたことにならないよう、その1回だけ捨てる。
+let swallowClicksUntil = 0;
+window.addEventListener('click', e => {
+  if (Date.now() < swallowClicksUntil) {
+    swallowClicksUntil = 0; // 捨てるのは1回だけ（すぐ押したキャンセルなどは効くように）
+    e.preventDefault(); e.stopPropagation();
+  }
+}, true);
+
+const kbActions = {
+  new: () => openComposer(),
+  reply: id => {
+    if (route.name === 'post' && route.params.id === id) $('.reply-box textarea')?.focus();
+    else openComposer({ parentId: id });
+  },
+};
+document.addEventListener('focusin', e => {
+  const c = e.target;
+  if (!c.classList?.contains('kb-catch')) return;
+  c.value = '';
+  const run = kbActions[c.dataset.kb];
+  if (!run) return;
+  swallowClicksUntil = Date.now() + 300;
+  run(c.dataset.id); // ここで同期的に（await せずに）本物の入力欄へフォーカスする
+});
 
 function openOverlay(html, { onClose } = {}) {
   const wrap = document.createElement('div');
@@ -91,14 +115,24 @@ function openOverlay(html, { onClose } = {}) {
 function actionSheet(items) {
   return new Promise(resolve => {
     const html = `<div class="backdrop"></div><div class="sheet" role="menu"><div class="grab"></div>
-      ${items.map((it, i) => `<button class="item ${it.danger ? 'danger' : ''}" data-i="${i}">${it.icon || ''}<span>${esc(it.label)}</span></button>`).join('')}
+      ${items.map((it, i) => {
+        const btn = `<button class="item ${it.danger ? 'danger' : ''}" data-i="${i}">${it.icon || ''}<span>${esc(it.label)}</span></button>`;
+        return it.kb ? `<div class="kb-wrap block">${btn}${kbCatch('sheet')}</div>` : btn;
+      }).join('')}
       <button class="item" data-i="-1"><span style="color:var(--fg-2)">キャンセル</span></button></div>`;
     let chosen = null;
     const o = openOverlay(html, { onClose: () => resolve(chosen) });
     o.el.querySelectorAll('.item').forEach(b => b.addEventListener('click', () => {
       const i = +b.dataset.i;
       chosen = i >= 0 ? items[i].value : null;
-      if (i >= 0 && items[i].keyboard) primeKeyboard(); // 編集画面を開く前にキーボードを準備
+      o.close();
+    }));
+    // 透明な入力欄がタップされたら、先に次の画面を開いてフォーカスを移し、それからシートを閉じる
+    o.el.querySelectorAll('.kb-wrap').forEach(w => w.querySelector('.kb-catch').addEventListener('focus', () => {
+      const i = +w.querySelector('.item').dataset.i;
+      swallowClicksUntil = Date.now() + 300;
+      chosen = null;
+      items[i].kb();
       o.close();
     }));
   });
@@ -187,7 +221,7 @@ function cardHtml(p, linkState) {
 
 function actionsHtml(p, replyCount) {
   return `<div class="actions">
-    <button class="act" data-act="reply" data-id="${esc(p.id)}" aria-label="返信">${I.reply}<span>${replyCount || ''}</span></button>
+    <span class="kb-wrap"><button class="act" data-act="reply" data-id="${esc(p.id)}" aria-label="返信">${I.reply}<span>${replyCount || ''}</span></button>${kbCatch('reply', p.id)}</span>
     <button class="act like ${p.liked ? 'on' : ''}" data-act="like" data-id="${esc(p.id)}" aria-label="いいね">${I.heart}</button>
     <button class="act" data-act="more" data-id="${esc(p.id)}" aria-label="その他">${I.more}</button>
   </div>`;
@@ -362,44 +396,55 @@ function mountComposer(root, { text = '', images = [], parentId = null, editId =
   };
 }
 
-async function openComposer({ parentId = null, editId = null } = {}) {
-  let text = '', images = [], quote = '';
+// ※ キーボードを出すため、この関数は await より前に入力欄へフォーカスする（async にしない）
+function openComposer({ parentId = null, editId = null } = {}) {
   const draftKey = !parentId && !editId ? 'draft' : null;
-  if (editId) {
-    const p = await db.getPost(editId);
-    if (!p) { kbProxy.blur(); return; }
-    text = p.text; images = p.images || [];
-  } else if (draftKey) {
-    text = await db.getMeta(draftKey, '') || '';
-  }
-  if (parentId) {
-    const parent = await db.getPost(parentId);
-    quote = parent?.text || '';
-  }
   const title = editId ? '編集' : parentId ? '返信' : '';
   const html = `<div class="backdrop"></div><div class="modal" role="dialog" aria-label="${title || '投稿'}">
     <div class="modal-head"><button class="link" data-m="cancel">キャンセル</button><b>${title}</b><span style="width:72px"></span></div>
     <div class="modal-body">
-      ${parentId ? `<div class="quote">${esc(quote.slice(0, 200))}</div>` : ''}
+      ${parentId ? '<div class="quote"></div>' : ''}
       ${composerHtml({ placeholder: parentId ? '返信を書く' : 'いまどうしてる？', submitLabel: editId ? '保存' : parentId ? '返信' : '投稿する' })}
     </div></div>`;
-  let comp;
+  let comp = null;
   const o = openOverlay(html, { onClose: () => comp?.discard() });
   // ヘッダー右に送信ボタンを移動（スマホで押しやすく）
   const submitBtn = $('[data-c="submit"]', o.el);
   const head = $('.modal-head', o.el);
   head.lastElementChild.replaceWith(submitBtn);
-  comp = mountComposer(o.el, {
-    text, images, parentId, editId, draftKey, autofocus: true,
-    onDone: post => {
-      o.close();
-      if (editId) toast('保存しました');
-      else if (parentId) toast('返信しました');
-      else if (route.name !== 'home') toast('投稿しました', { label: '表示', run: () => go(`#/post/${post.id}`) });
-    },
-  });
   $('[data-m="cancel"]', o.el).addEventListener('click', () => o.close());
   $('.backdrop', o.el).replaceWith($('.backdrop', o.el).cloneNode()); // 背景タップで閉じない（誤操作防止）
+
+  // タップと同じ処理の中でフォーカスする（ここより前に await を置かないこと）
+  const ta = $('textarea', o.el);
+  ta.focus({ preventScroll: true });
+
+  // 下書き・編集する本文・返信先は、フォーカスしたあとで読み込む
+  (async () => {
+    let text = '', images = [];
+    if (editId) {
+      const p = await db.getPost(editId);
+      if (!p) { o.close(); toast('投稿が見つかりません'); return; }
+      text = p.text; images = p.images || [];
+    } else if (draftKey) {
+      text = await db.getMeta(draftKey, '') || '';
+    }
+    if (parentId) {
+      const parent = await db.getPost(parentId);
+      $('.quote', o.el).textContent = (parent?.text || '').slice(0, 200);
+    }
+    if (!o.el.isConnected) return; // 読み込み中に閉じられた
+    if (!editId && ta.value) text = ta.value; // 読み込み中に打ち始めていたら、それを残す
+    comp = mountComposer(o.el, {
+      text, images, parentId, editId, draftKey, autofocus: true,
+      onDone: post => {
+        o.close();
+        if (editId) toast('保存しました');
+        else if (parentId) toast('返信しました');
+        else if (route.name !== 'home') toast('投稿しました', { label: '表示', run: () => go(`#/post/${post.id}`) });
+      },
+    });
+  })();
 }
 
 // =====================================================================
@@ -453,7 +498,7 @@ async function postMenu(id) {
   const p = await db.getPost(id);
   if (!p) return;
   const choice = await actionSheet([
-    { label: '編集', value: 'edit', icon: I.edit, keyboard: true },
+    { label: '編集', value: 'edit', icon: I.edit, kb: () => openComposer({ editId: id }) },
     { label: 'テキストをコピー', value: 'copy', icon: I.copy },
     ...(extractUrls(p.text).length ? [{ label: 'リンク情報を再取得', value: 'refetch', icon: I.link }] : []),
     { label: '削除', value: 'delete', icon: I.trash, danger: true },
@@ -478,6 +523,7 @@ async function postMenu(id) {
 
 document.addEventListener('click', e => {
   if (e.target.closest('#overlay-root')) return;
+  if (e.target.closest('.kb-catch')) return; // 透明な入力欄（focusin で処理済み）
   const a = e.target.closest('a');
   const act = e.target.closest('[data-act]');
   if (a) {
@@ -505,7 +551,7 @@ document.addEventListener('click', e => {
     case 'reply':
       e.stopPropagation();
       if (route.name === 'post' && route.params.id === id) $('.reply-box textarea')?.focus();
-      else { primeKeyboard(); openComposer({ parentId: id }); }
+      else openComposer({ parentId: id });
       break;
     case 'more':
       e.stopPropagation();
@@ -553,7 +599,7 @@ async function renderHome({ keepScroll = false, restoreY = null } = {}) {
   home.done = home.items.length < n;
   const body = home.items.length ? await listHtml(home.items)
     : `<div class="empty"><h2>ようこそ</h2><p>思いついたことを、つぶやくようにメモしましょう。<br>投稿はこの端末に保存され、オフラインでも使えます。</p>
-       ${wide.matches ? '' : '<button class="btn" id="firstPost">最初の投稿をする</button>'}</div>`;
+       ${wide.matches ? '' : `<span class="kb-wrap"><button class="btn" id="firstPost">最初の投稿をする</button>${kbCatch('new')}</span>`}</div>`;
   const hasComposer = !!$('#inlineComposer');
   if (keepScroll && $('#list') && hasComposer === wide.matches) {
     // 入力中のフォームは残して一覧だけ差し替える
@@ -567,7 +613,7 @@ async function renderHome({ keepScroll = false, restoreY = null } = {}) {
       mountComposer($('#inlineComposer'), { text, draftKey: 'draft' });
     }
   }
-  $('#firstPost')?.addEventListener('click', () => { primeKeyboard(); openComposer(); });
+  $('#firstPost')?.addEventListener('click', () => openComposer());
   if (keepScroll) scrollTo(0, y);
   else if (restoreY) scrollTo(0, restoreY);
   hydrateImages();
@@ -1242,7 +1288,14 @@ function registerSW() {
 async function boot() {
   profile = { ...profile, ...(await db.getMeta('profile', {})) };
   applyLook(await getLook());
-  $('#fab').addEventListener('click', () => { primeKeyboard(); openComposer(); });
+  $('#fab').insertAdjacentHTML('beforeend', kbCatch('new'));
+  $('#fab').addEventListener('click', e => {
+    if (e.target.closest('.kb-catch')) return; // 透明な入力欄から開いた場合
+    openComposer();
+  });
+  $('#fab').addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openComposer(); }
+  });
   wide.addEventListener('change', () => route.name === 'home' && renderHome());
   await render();
   renderSyncBtn();
