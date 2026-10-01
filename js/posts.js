@@ -20,11 +20,11 @@ export async function addImagesFromFiles(files) {
   return out;
 }
 
-export async function createPost({ text, images = [], parentId = null }) {
+export async function createPost({ text, images = [], parentId = null, quoteId = null }) {
   const t = nowIso();
   const post = {
     id: uuid(), text: text.trim(), createdAt: t, updatedAt: t,
-    deleted: 0, liked: 0, parentId, images, links: {}, dirty: 1,
+    deleted: 0, liked: 0, parentId, quoteId, images, links: {}, dirty: 1,
   };
   await db.putPost(post);
   changed([post.id]);
@@ -86,6 +86,33 @@ export async function getThread(id) {
   }
   const replies = await db.childrenOf(id);
   return { post, ancestors, replies };
+}
+
+// 返信のツリー：rootId の下にぶら下がる返信を、入れ子の形で返す
+// [{ post, children: [{ post, children: [...] }, ...] }, ...]（同じ階層は古い順）
+export async function getReplyTree(rootId) {
+  const all = await db.allPosts();
+  const kids = new Map();
+  for (const p of all) {
+    if (p.deleted || !p.parentId) continue;
+    if (!kids.has(p.parentId)) kids.set(p.parentId, []);
+    kids.get(p.parentId).push(p);
+  }
+  for (const list of kids.values()) list.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const seen = new Set([rootId]); // 念のため、ぐるぐる回る参照を防ぐ
+  const build = id => (kids.get(id) || [])
+    .filter(p => !seen.has(p.id) && seen.add(p.id))
+    .map(p => ({ post: p, children: build(p.id) }));
+  return build(rootId);
+}
+
+// ツリーの中の投稿数（子・孫…すべて）
+export const countTree = nodes => nodes.reduce((n, x) => n + 1 + countTree(x.children), 0);
+
+// このポストを引用しているポスト（新しい順）
+export async function quotesOf(id) {
+  const all = await db.allPosts();
+  return all.filter(p => !p.deleted && p.quoteId === id).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 export async function replyCounts(ids) {

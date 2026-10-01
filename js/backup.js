@@ -12,9 +12,9 @@ function csvCell(v) {
 
 export async function exportCsv() {
   const posts = (await db.allPosts()).filter(p => !p.deleted).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  const header = ['id', 'datetime', 'text', 'liked', 'reply_to', 'images', 'urls', 'created_at', 'updated_at'];
+  const header = ['id', 'datetime', 'text', 'liked', 'reply_to', 'quote_of', 'images', 'urls', 'created_at', 'updated_at'];
   const rows = posts.map(p => [
-    p.id, localStamp(p.createdAt), p.text, p.liked ? 1 : 0, p.parentId || '',
+    p.id, localStamp(p.createdAt), p.text, p.liked ? 1 : 0, p.parentId || '', p.quoteId || '',
     (p.images || []).length, extractUrls(p.text).join(' '), p.createdAt, p.updatedAt,
   ]);
   const csv = '﻿' + [header, ...rows].map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
@@ -68,12 +68,15 @@ export async function importJson(file) {
     if (!p.id || !p.createdAt) continue;
     const post = {
       id: p.id, text: p.text || '', createdAt: p.createdAt, updatedAt: p.updatedAt || p.createdAt,
-      deleted: p.deleted ? 1 : 0, liked: p.liked ? 1 : 0, parentId: p.parentId || null,
+      deleted: p.deleted ? 1 : 0, liked: p.liked ? 1 : 0, parentId: p.parentId || null, quoteId: p.quoteId || null,
       images: p.images || [], links: p.links || {},
     };
     if (await mergePost(post)) postCount++;
   }
-  if (data.profile && !(await db.getMeta('profile', null))) await db.setMeta('profile', data.profile);
+  if (data.profile && !(await db.getMeta('profile', null))) {
+    await db.setMeta('profile', { ...data.profile, updatedAt: nowIso() });
+    await db.setMeta('profile.dirty', true);
+  }
   emit('posts-changed', { ids: [], bulk: true });
   return { posts: postCount, images: imgCount };
 }
@@ -125,6 +128,7 @@ export async function importCsv(file) {
   const cUpdated = col('updated_at');
   const cLiked = col('liked', 'いいね');
   const cReply = col('reply_to');
+  const cQuote = col('quote_of');
   let count = 0;
   for (const r of rows.slice(1)) {
     const text = r[cText] ?? '';
@@ -137,6 +141,7 @@ export async function importCsv(file) {
       updatedAt: (cUpdated >= 0 && parseDate(r[cUpdated])) || createdAt,
       deleted: 0, liked: cLiked >= 0 && /^(1|true|yes)$/i.test(r[cLiked] || '') ? 1 : 0,
       parentId: cReply >= 0 && UUID_RE.test(r[cReply] || '') ? r[cReply].toLowerCase() : null,
+      quoteId: cQuote >= 0 && UUID_RE.test(r[cQuote] || '') ? r[cQuote].toLowerCase() : null,
       images: existing?.images || [], links: existing?.links || {},
     };
     if (await mergePost(post)) count++;

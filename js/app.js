@@ -9,7 +9,7 @@ import {
   blobToDataUrl, formatBytes, localStamp, dayKey,
 } from './util.js';
 
-export const APP_VERSION = '1.1.2';
+export const APP_VERSION = '1.2.0';
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -37,9 +37,21 @@ const I = {
   pin: '<svg viewBox="0 0 24 24"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>',
   calendar: '<svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>',
   arrowDown: '<svg viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></svg>',
+  repost: '<svg viewBox="0 0 24 24"><path d="M7 17V8a2 2 0 0 1 2-2h9M15 3l3 3-3 3M17 7v9a2 2 0 0 1-2 2H6M9 21l-3-3 3-3"/></svg>',
+  chevD: '<svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>',
+  chevR: '<svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>',
 };
 
-let profile = { name: '自分', handle: 'me', avatar: null, banner: null, bio: '', location: '', website: '' };
+const DEFAULT_PROFILE = { name: '自分', handle: 'me', avatar: null, banner: null, bio: '', location: '', website: '' };
+let profile = { ...DEFAULT_PROFILE };
+
+// プロフィールを保存する（updatedAt を付けて、同期の送信待ちにする）
+async function saveProfile(next) {
+  profile = { ...next, updatedAt: new Date().toISOString() };
+  await db.setMeta('profile', profile);
+  await db.setMeta('profile.dirty', true);
+  sync.scheduleSync();
+}
 let route = { name: 'home', params: {} };
 const home = { items: [], done: false, loading: false };
 const skipRender = new Set();
@@ -83,6 +95,7 @@ window.addEventListener('click', e => {
 
 const kbActions = {
   new: () => openComposer(),
+  quote: id => openComposer({ quoteId: id }),
   reply: id => {
     if (route.name === 'post' && route.params.id === id) $('.reply-box textarea')?.focus();
     else openComposer({ parentId: id });
@@ -219,11 +232,29 @@ function cardHtml(p, linkState) {
     </div></a>`;
 }
 
-function actionsHtml(p, replyCount) {
+function actionsHtml(p, ctx) {
+  const replyCount = ctx.replies.get(p.id), quoteCount = ctx.quotes.get(p.id);
   return `<div class="actions">
     <span class="kb-wrap"><button class="act" data-act="reply" data-id="${esc(p.id)}" aria-label="返信">${I.reply}<span>${replyCount || ''}</span></button>${kbCatch('reply', p.id)}</span>
+    <span class="kb-wrap"><button class="act quote" data-act="quote" data-id="${esc(p.id)}" aria-label="引用">${I.repost}<span>${quoteCount || ''}</span></button>${kbCatch('quote', p.id)}</span>
     <button class="act like ${p.liked ? 'on' : ''}" data-act="like" data-id="${esc(p.id)}" aria-label="いいね">${I.heart}</button>
     <button class="act" data-act="more" data-id="${esc(p.id)}" aria-label="その他">${I.more}</button>
+  </div>`;
+}
+
+// 引用したポストを、カードとして埋め込む
+function quoteEmbedHtml(quoteId, byId) {
+  if (!quoteId) return '';
+  const q = byId.get(quoteId);
+  if (!q || q.deleted) {
+    return `<div class="qcard gone">${q ? 'このポストは削除されました' : 'このポストは表示できません（まだ同期されていない可能性があります）'}</div>`;
+  }
+  const imgs = (q.images || []).slice(0, 4);
+  return `<div class="qcard" data-act="open" data-id="${esc(q.id)}" role="link">
+    <div class="qmeta">${avatarHtml('xs')}<b>${esc(profile.name)}</b><span class="handle">@${esc(profile.handle)}</span><span>·</span><time data-t="${esc(q.createdAt)}">${relTime(q.createdAt)}</time></div>
+    ${q.text ? `<div class="qtext">${renderText(q.text)}</div>` : ''}
+    ${imgs.length ? `<div class="qmedia">${imgs.map(im => `<div class="m" data-img="${esc(im.id)}"><div class="ph"></div></div>`).join('')}</div>` : ''}
+    ${q.quoteId ? '<div class="qnote">さらに別のポストを引用しています</div>' : ''}
   </div>`;
 }
 
@@ -234,14 +265,15 @@ function postHtml(p, ctx) {
         ? `<a href="#/post/${esc(parent.id)}">${esc(parent.text.slice(0, 40) || '(画像)')}</a>`
         : '削除された投稿'}</div>` : '';
   return `<article class="post ${ctx.cls || ''}" data-act="open" data-id="${esc(p.id)}">
-    <div class="avatar-col" data-act="profile">${avatarHtml()}</div>
+    <div class="avatar-col" data-act="profile">${avatarHtml(ctx.avatarCls || '')}</div>
     <div class="body">
       <div class="meta"><b>${esc(profile.name)}</b><span class="handle">@${esc(profile.handle)}</span><span>·</span><time data-t="${esc(p.createdAt)}" title="${esc(fullTime(p.createdAt))}">${relTime(p.createdAt)}</time></div>
       ${replyTo}
       ${p.text ? `<div class="text">${renderText(p.text)}</div>` : ''}
       ${mediaHtml(p)}
+      ${quoteEmbedHtml(p.quoteId, ctx.byId)}
       ${cardHtml(p, ctx.link)}
-      ${actionsHtml(p, ctx.replies.get(p.id))}
+      ${actionsHtml(p, ctx)}
     </div>
   </article>`;
 }
@@ -251,21 +283,27 @@ function mainPostHtml(p, ctx) {
     <div class="head"><span data-act="profile">${avatarHtml()}</span><div class="who"><b>${esc(profile.name)}</b><span>@${esc(profile.handle)}</span></div></div>
     ${p.text ? `<div class="text">${renderText(p.text)}</div>` : ''}
     ${mediaHtml(p)}
+    ${quoteEmbedHtml(p.quoteId, ctx.byId)}
     ${cardHtml(p, ctx.link)}
     <div class="when">${esc(fullTime(p.createdAt))}</div>
-    ${actionsHtml(p, ctx.replies.get(p.id))}
+    ${ctx.stats || ''}
+    ${actionsHtml(p, ctx)}
   </article>`;
 }
 
-// 描画に必要な周辺情報（返信数・返信先・リンク設定）
+// 描画に必要な周辺情報（返信数・引用数・返信先・引用元・リンク設定）
 async function buildCtx(posts) {
   const all = await db.allPosts();
-  const replies = new Map();
+  const replies = new Map(), quotes = new Map();
   const byId = new Map(all.map(p => [p.id, p]));
-  for (const p of all) if (p.parentId && !p.deleted) replies.set(p.parentId, (replies.get(p.parentId) || 0) + 1);
+  for (const p of all) {
+    if (p.deleted) continue;
+    if (p.parentId) replies.set(p.parentId, (replies.get(p.parentId) || 0) + 1);
+    if (p.quoteId) quotes.set(p.quoteId, (quotes.get(p.quoteId) || 0) + 1);
+  }
   const parents = new Map();
   for (const p of posts) if (p.parentId) parents.set(p.parentId, byId.get(p.parentId));
-  return { replies, parents, link: { enabled: await LP.enabled() } };
+  return { replies, quotes, parents, byId, link: { enabled: await LP.enabled() } };
 }
 
 async function listHtml(posts, extra = {}) {
@@ -282,6 +320,7 @@ function composerHtml({ placeholder = 'いまどうしてる？', submitLabel = 
     <div class="c-body">
       <textarea rows="2" placeholder="${esc(placeholder)}" aria-label="本文"></textarea>
       <div class="c-thumbs"></div>
+      <div class="c-quote"></div>
       <div class="c-bar">
         <button class="icon-btn" data-c="img" aria-label="画像を追加">${I.image}</button>
         <input type="file" accept="image/*" multiple hidden>
@@ -294,7 +333,7 @@ function composerHtml({ placeholder = 'いまどうしてる？', submitLabel = 
 }
 
 // 投稿フォームの振る舞いを取り付ける
-function mountComposer(root, { text = '', images = [], parentId = null, editId = null, draftKey = null, autofocus = false, onDone } = {}) {
+function mountComposer(root, { text = '', images = [], parentId = null, quoteId = null, editId = null, draftKey = null, autofocus = false, onDone } = {}) {
   const ta = $('textarea', root);
   const thumbs = $('.c-thumbs', root);
   const submit = $('[data-c="submit"]', root);
@@ -309,7 +348,7 @@ function mountComposer(root, { text = '', images = [], parentId = null, editId =
   const refresh = () => {
     const n = Array.from(ta.value).length;
     count.textContent = n ? String(n) : '';
-    submit.disabled = busy || (!ta.value.trim() && !imgs.length);
+    submit.disabled = busy || (!ta.value.trim() && !imgs.length && !quoteId); // 引用だけならコメントなしでも投稿できる
     autosize();
   };
   const saveDraft = draftKey ? debounce(() => db.setMeta(draftKey, ta.value), 400) : () => {};
@@ -366,7 +405,7 @@ function mountComposer(root, { text = '', images = [], parentId = null, editId =
     try {
       let post;
       if (editId) post = await P.editText(editId, ta.value, imgs);
-      else post = await P.createPost({ text: ta.value, images: imgs, parentId });
+      else post = await P.createPost({ text: ta.value, images: imgs, parentId, quoteId });
       added.clear();
       imgs = [];
       ta.value = '';
@@ -397,14 +436,14 @@ function mountComposer(root, { text = '', images = [], parentId = null, editId =
 }
 
 // ※ キーボードを出すため、この関数は await より前に入力欄へフォーカスする（async にしない）
-function openComposer({ parentId = null, editId = null } = {}) {
-  const draftKey = !parentId && !editId ? 'draft' : null;
-  const title = editId ? '編集' : parentId ? '返信' : '';
+function openComposer({ parentId = null, editId = null, quoteId = null } = {}) {
+  const draftKey = !parentId && !editId && !quoteId ? 'draft' : null;
+  const title = editId ? '編集' : parentId ? '返信' : quoteId ? '引用' : '';
   const html = `<div class="backdrop"></div><div class="modal" role="dialog" aria-label="${title || '投稿'}">
     <div class="modal-head"><button class="link" data-m="cancel">キャンセル</button><b>${title}</b><span style="width:72px"></span></div>
     <div class="modal-body">
       ${parentId ? '<div class="quote"></div>' : ''}
-      ${composerHtml({ placeholder: parentId ? '返信を書く' : 'いまどうしてる？', submitLabel: editId ? '保存' : parentId ? '返信' : '投稿する' })}
+      ${composerHtml({ placeholder: parentId ? '返信を書く' : quoteId ? 'コメントを追加' : 'いまどうしてる？', submitLabel: editId ? '保存' : parentId ? '返信' : '投稿する' })}
     </div></div>`;
   let comp = null;
   const o = openOverlay(html, { onClose: () => comp?.discard() });
@@ -426,8 +465,15 @@ function openComposer({ parentId = null, editId = null } = {}) {
       const p = await db.getPost(editId);
       if (!p) { o.close(); toast('投稿が見つかりません'); return; }
       text = p.text; images = p.images || [];
+      quoteId = p.quoteId || null; // 引用ポストの編集では、引用元も表示する
     } else if (draftKey) {
       text = await db.getMeta(draftKey, '') || '';
+    }
+    if (quoteId) {
+      const q = await db.getPost(quoteId);
+      const box = $('.c-quote', o.el);
+      box.innerHTML = quoteEmbedHtml(quoteId, new Map(q ? [[q.id, q]] : []));
+      hydrateImages(box);
     }
     if (parentId) {
       const parent = await db.getPost(parentId);
@@ -436,11 +482,12 @@ function openComposer({ parentId = null, editId = null } = {}) {
     if (!o.el.isConnected) return; // 読み込み中に閉じられた
     if (!editId && ta.value) text = ta.value; // 読み込み中に打ち始めていたら、それを残す
     comp = mountComposer(o.el, {
-      text, images, parentId, editId, draftKey, autofocus: true,
+      text, images, parentId, quoteId: editId ? null : quoteId, editId, draftKey, autofocus: true,
       onDone: post => {
         o.close();
         if (editId) toast('保存しました');
         else if (parentId) toast('返信しました');
+        else if (quoteId) toast('引用しました', { label: '表示', run: () => go(`#/post/${post.id}`) });
         else if (route.name !== 'home') toast('投稿しました', { label: '表示', run: () => go(`#/post/${post.id}`) });
       },
     });
@@ -552,6 +599,19 @@ document.addEventListener('click', e => {
       e.stopPropagation();
       if (route.name === 'post' && route.params.id === id) $('.reply-box textarea')?.focus();
       else openComposer({ parentId: id });
+      break;
+    case 'quote':
+      e.stopPropagation();
+      openComposer({ quoteId: id });
+      break;
+    case 'tree': // 返信ツリーの折りたたみ
+      e.stopPropagation();
+      if (collapsed.has(id)) collapsed.delete(id); else collapsed.add(id);
+      softRender();
+      break;
+    case 'to-quotes':
+      e.stopPropagation();
+      $('#quotes')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       break;
     case 'more':
       e.stopPropagation();
@@ -695,6 +755,30 @@ async function renderLikes() {
 }
 
 // ---------- 投稿の詳細（スレッド） ----------
+// 返信ツリーで折りたたんだ投稿の id
+const collapsed = new Set();
+const TREE_MAX_INDENT = 4; // これより深い返信は、字下げせずに並べる（スマホの幅に収めるため）
+
+// 返信ツリーを入れ子の HTML にする
+function treeHtml(nodes, ctx, depth = 0) {
+  return nodes.map(({ post, children }) => {
+    const hasKids = children.length > 0;
+    const isClosed = collapsed.has(post.id);
+    const cls = ['tree-post', depth ? 'nested' : '', hasKids ? 'has-kids' : ''].join(' ');
+    const branch = !hasKids ? '' : `
+      <div class="tbranch${depth + 1 >= TREE_MAX_INDENT ? ' flat' : ''}">
+        <button class="tree-toggle" data-act="tree" data-id="${esc(post.id)}">${isClosed
+          ? `${I.chevR}<span>返信 ${P.countTree(children)}件を表示</span>`
+          : `${I.chevD}<span>返信を折りたたむ</span>`}</button>
+        ${isClosed ? '' : treeHtml(children, ctx, depth + 1)}
+      </div>`;
+    return `<div class="tnode${depth ? '' : ' top'}">
+      ${postHtml(post, { ...ctx, cls, showReplyTo: false, avatarCls: depth ? 'sm' : '' })}
+      ${branch}
+    </div>`;
+  }).join('');
+}
+
 async function renderPost(id) {
   setChrome({ title: 'ポスト', back: true, fab: false });
   const t = await P.getThread(id);
@@ -703,15 +787,23 @@ async function renderPost(id) {
     return;
   }
   const visibleAnc = t.ancestors.filter(a => !a.deleted);
-  const ctx = await buildCtx([...visibleAnc, t.post, ...t.replies]);
+  const tree = await P.getReplyTree(id);
+  const quotes = await P.quotesOf(id);
+  const ctx = await buildCtx([...visibleAnc, t.post, ...quotes]);
+  const totalReplies = P.countTree(tree);
+  const stats = totalReplies || quotes.length ? `<div class="stats">
+      ${totalReplies ? `<span><b>${totalReplies}</b> 件の返信</span>` : ''}
+      ${quotes.length ? `<button data-act="to-quotes"><b>${quotes.length}</b> 件の引用</button>` : ''}
+    </div>` : '';
   const same = view.dataset.postId === id;
   const oldBox = same ? $('.reply-box') : null;
   view.dataset.postId = id;
   view.innerHTML = `
     ${visibleAnc.map(a => postHtml(a, { ...ctx, cls: 'thread-parent', showReplyTo: false })).join('')}
-    ${mainPostHtml(t.post, ctx)}
+    ${mainPostHtml(t.post, { ...ctx, stats })}
     <div class="reply-box">${composerHtml({ placeholder: '返信を書く', submitLabel: '返信' })}</div>
-    <div id="replies">${t.replies.map(r => postHtml(r, { ...ctx, showReplyTo: false })).join('')}</div>`;
+    <div id="replies" class="tree">${treeHtml(tree, ctx)}</div>
+    ${quotes.length ? `<div id="quotes"><div class="section-label">${I.repost}このポストを引用したポスト</div>${quotes.map(q => postHtml(q, ctx)).join('')}</div>` : ''}`;
   if (oldBox) $('.reply-box').replaceWith(oldBox); // 入力中の返信フォームを維持
   else mountComposer($('.reply-box'), { parentId: id, onDone: () => toast('返信しました') });
   hydrateImages();
@@ -1045,8 +1137,7 @@ function openProfileEditor() {
         name: f.name || '自分',
         handle: f.handle.replace(/^@/, '').replace(/\s+/g, '') || 'me',
       });
-      profile = draft;
-      await db.setMeta('profile', profile);
+      await saveProfile(draft);
       o.close();
       toast('プロフィールを保存しました');
       render({ soft: true });
@@ -1245,6 +1336,10 @@ P.bus.addEventListener('posts-changed', e => {
   if (onlyLikes && route.name !== 'likes') return;
   softRender();
 });
+P.bus.addEventListener('profile-changed', async () => {
+  profile = { ...DEFAULT_PROFILE, ...(await db.getMeta('profile', {})) };
+  softRender();
+});
 let lastSyncState = null;
 P.bus.addEventListener('sync-status', e => {
   renderSyncBtn(e.detail);
@@ -1286,7 +1381,13 @@ function registerSW() {
 }
 
 async function boot() {
-  profile = { ...profile, ...(await db.getMeta('profile', {})) };
+  const stored = await db.getMeta('profile', null);
+  if (stored && !stored.updatedAt) {
+    // v1.1 以前に編集したプロフィール：同期できるよう日時を付けて送信待ちにする
+    await db.setMeta('profile', { ...stored, updatedAt: new Date().toISOString() });
+    await db.setMeta('profile.dirty', true);
+  }
+  profile = { ...DEFAULT_PROFILE, ...(await db.getMeta('profile', {})) };
   applyLook(await getLook());
   $('#fab').insertAdjacentHTML('beforeend', kbCatch('new'));
   $('#fab').addEventListener('click', e => {

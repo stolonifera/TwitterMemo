@@ -90,6 +90,7 @@ async function afterSignIn() {
     const all = await db.allPosts();
     await db.putPosts(all.map(p => ({ ...p, dirty: 1 })));
     for (const img of await db.allImages()) await db.putImage({ ...img, uploaded: 0 });
+    if (await db.getMeta('profile', null)) await db.setMeta('profile.dirty', true);
   }
   await db.setMeta('sync.uid', uid);
   setStatus({ state: 'idle', message: '' });
@@ -131,6 +132,8 @@ function jaError(e) {
   if (/Password should be/i.test(m)) return 'パスワードが短すぎます（6文字以上）';
   if (/already registered/i.test(m)) return 'このメールアドレスは登録済みです';
   if (/Failed to fetch|NetworkError|Load failed/i.test(m)) return 'サーバーに接続できませんでした';
+  if (/quote_id|profiles/i.test(m) && /column|table|relation|schema cache/i.test(m))
+    return 'サーバーの更新が必要です。Supabase の SQL Editor で supabase/update-v1.2.sql を実行してください';
   if (/relation .* does not exist|Could not find the table/i.test(m)) return 'posts テーブルがありません（schema.sql を実行してください）';
   if (/Bucket not found/i.test(m)) return '画像用のバケットがありません（schema.sql を実行してください）';
   return m;
@@ -140,13 +143,15 @@ function jaError(e) {
 const toRow = (p, uid) => ({
   id: p.id, user_id: uid, text: p.text, created_at: p.createdAt, updated_at: p.updatedAt,
   deleted: !!p.deleted, liked: !!p.liked, parent_id: p.parentId || null,
+  // quote_id は v1.2 で増えた列。サーバー更新前でも普通の投稿は同期できるよう、引用のときだけ送る
+  ...(p.quoteId ? { quote_id: p.quoteId } : {}),
   images: p.images || [], links: p.links || {},
 });
 
 const iso = v => (v ? new Date(v).toISOString() : v);
 const fromRow = r => ({
   id: r.id, text: r.text || '', createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
-  deleted: r.deleted ? 1 : 0, liked: r.liked ? 1 : 0, parentId: r.parent_id || null,
+  deleted: r.deleted ? 1 : 0, liked: r.liked ? 1 : 0, parentId: r.parent_id || null, quoteId: r.quote_id || null,
   images: r.images || [], links: r.links || {}, dirty: 0,
 });
 
@@ -234,6 +239,39 @@ async function mergeRemote(remote) {
   return false;
 }
 
+// ---- プロフィールの同期 ----
+// 端末のプロフィールは meta の 'profile'（updatedAt 付き）。変更すると 'profile.dirty' が true になる。
+async function pushProfile(uid) {
+  if (!(await db.getMeta('profile.dirty', false))) return;
+  const prof = await db.getMeta('profile', null);
+  if (!prof) return;
+  const { updatedAt, ...data } = prof;
+  const { error } = await client.from('profiles')
+    .upsert({ user_id: uid, data, updated_at: updatedAt || new Date().toISOString() }, { onConflict: 'user_id' });
+  if (error) throw error;
+  // 送っている間に書き換えられていなければ送信済みにする
+  const cur = await db.getMeta('profile', null);
+  if (cur?.updatedAt === updatedAt) await db.setMeta('profile.dirty', false);
+}
+
+async function pullProfile(uid) {
+  const cursorKey = `sync.pcursor:${uid}`;
+  const cursor = await db.getMeta(cursorKey, '1970-01-01T00:00:00Z');
+  const { data, error } = await client.from('profiles').select('*').gt('server_updated_at', cursor);
+  if (error) throw error;
+  const row = data?.[0];
+  if (!row) return;
+  const local = await db.getMeta('profile', null);
+  const remoteAt = iso(row.updated_at);
+  // 新しい方を残す（端末で未送信の変更の方が新しければ、端末側を残して次に送る）
+  if (!local?.updatedAt || remoteAt > local.updatedAt) {
+    await db.setMeta('profile', { ...row.data, updatedAt: remoteAt });
+    await db.setMeta('profile.dirty', false);
+    emit('profile-changed', {});
+  }
+  await db.setMeta(cursorKey, row.server_updated_at);
+}
+
 export function syncNow() {
   if (running) { again = true; return running; }
   const job = (async () => {
@@ -248,12 +286,15 @@ export function syncNow() {
         await push(uid);
         await pull(uid);
         await push(uid); // 取り込み中に付いたリンクプレビューなど
+        await pushProfile(uid);
+        await pullProfile(uid);
         const t = new Date().toISOString();
         await db.setMeta('sync.lastSyncAt', t);
         setStatus({ state: 'idle', lastSyncAt: t, pending: (await db.dirtyPosts()).length });
       } catch (e) {
         console.error('sync failed', e);
-        setStatus({ state: navigator.onLine ? 'error' : 'offline', message: jaError(e) });
+        const pending = (await db.dirtyPosts()).length;
+        setStatus({ state: navigator.onLine ? 'error' : 'offline', message: jaError(e), pending });
       }
     } while (again);
   })();
