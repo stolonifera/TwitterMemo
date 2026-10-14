@@ -9,7 +9,7 @@ import {
   blobToDataUrl, formatBytes, localStamp, dayKey,
 } from './util.js';
 
-export const APP_VERSION = '1.2.0';
+export const APP_VERSION = '1.2.1';
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -259,13 +259,13 @@ function quoteEmbedHtml(quoteId, byId) {
 }
 
 function postHtml(p, ctx) {
-  const parent = p.parentId ? ctx.parents.get(p.parentId) : null;
+  const parent = p.parentId ? (ctx.parents.get(p.parentId) || ctx.byId?.get(p.parentId)) : null;
   const replyTo = p.parentId && ctx.showReplyTo !== false
     ? `<div class="replyto">返信先: ${parent && !parent.deleted
         ? `<a href="#/post/${esc(parent.id)}">${esc(parent.text.slice(0, 40) || '(画像)')}</a>`
         : '削除された投稿'}</div>` : '';
   return `<article class="post ${ctx.cls || ''}" data-act="open" data-id="${esc(p.id)}">
-    <div class="avatar-col" data-act="profile">${avatarHtml(ctx.avatarCls || '')}</div>
+    <div class="avatar-col" data-act="profile">${avatarHtml()}</div>
     <div class="body">
       <div class="meta"><b>${esc(profile.name)}</b><span class="handle">@${esc(profile.handle)}</span><span>·</span><time data-t="${esc(p.createdAt)}" title="${esc(fullTime(p.createdAt))}">${relTime(p.createdAt)}</time></div>
       ${replyTo}
@@ -757,26 +757,39 @@ async function renderLikes() {
 // ---------- 投稿の詳細（スレッド） ----------
 // 返信ツリーで折りたたんだ投稿の id
 const collapsed = new Set();
-const TREE_MAX_INDENT = 4; // これより深い返信は、字下げせずに並べる（スマホの幅に収めるため）
 
-// 返信ツリーを入れ子の HTML にする
-function treeHtml(nodes, ctx, depth = 0) {
-  return nodes.map(({ post, children }) => {
-    const hasKids = children.length > 0;
-    const isClosed = collapsed.has(post.id);
-    const cls = ['tree-post', depth ? 'nested' : '', hasKids ? 'has-kids' : ''].join(' ');
-    const branch = !hasKids ? '' : `
-      <div class="tbranch${depth + 1 >= TREE_MAX_INDENT ? ' flat' : ''}">
-        <button class="tree-toggle" data-act="tree" data-id="${esc(post.id)}">${isClosed
-          ? `${I.chevR}<span>返信 ${P.countTree(children)}件を表示</span>`
-          : `${I.chevD}<span>返信を折りたたむ</span>`}</button>
-        ${isClosed ? '' : treeHtml(children, ctx, depth + 1)}
-      </div>`;
-    return `<div class="tnode${depth ? '' : ' top'}">
-      ${postHtml(post, { ...ctx, cls, showReplyTo: false, avatarCls: depth ? 'sm' : '' })}
-      ${branch}
-    </div>`;
-  }).join('');
+// 返信ツリーの HTML を作る（Twitter のスレッドのように、字下げせず同じ大きさで縦に並べる）
+// ・詳細画面の投稿への直接の返信ごとに、区切り線で分ける
+// ・その下の返信（返信への返信…）は、親 → 子の順に続けて並べ、アイコンを線でつなぐ
+// ・すぐ上の投稿への返信でないとき（2つ目以降の兄弟など）は「返信先」を表示する
+function treeHtml(nodes, ctx) {
+  return nodes.map(node => `<div class="tnode top">${threadHtml(node, ctx, null)}</div>`).join('');
+}
+
+// node とその下の返信を、上から順に並べた HTML。prevId は、すぐ上に表示されている投稿の id
+function threadHtml({ post, children }, ctx, prevId) {
+  const hasKids = children.length > 0;
+  const isClosed = collapsed.has(post.id);
+  const linked = prevId !== null && post.parentId === prevId; // すぐ上の投稿への返信 → 線でつなぐ
+  const cls = ['tree-post', hasKids ? 'has-kids' : '', linked ? 'linked' : ''].join(' ');
+  let html = postHtml(post, { ...ctx, cls, showReplyTo: prevId !== null && !linked });
+  if (!hasKids) return html;
+  html += `<button class="tree-toggle" data-act="tree" data-id="${esc(post.id)}">${isClosed
+    ? `${I.chevR}<span>返信 ${P.countTree(children)}件を表示</span>`
+    : `${I.chevD}<span>返信を折りたたむ</span>`}</button>`;
+  if (isClosed) return html;
+  let prev = post.id;
+  for (const child of children) {
+    html += threadHtml(child, ctx, prev);
+    prev = lastId(child); // 次の兄弟のすぐ上には、この子の一番下の返信が来る
+  }
+  return html;
+}
+
+// node の下で、表示上いちばん最後に来る投稿の id
+function lastId({ post, children }) {
+  if (!children.length || collapsed.has(post.id)) return post.id;
+  return lastId(children[children.length - 1]);
 }
 
 async function renderPost(id) {
@@ -1054,7 +1067,7 @@ async function renderProfile(params) {
         <span>${I.calendar}${d.getFullYear()}年${d.getMonth() + 1}月から利用しています</span>
       </div>
       <div class="pf-stats">
-        <span><b>${all.filter(PF_FILTERS.posts).length.toLocaleString()}</b>ポスト</span>
+        <span><b>${all.length.toLocaleString()}</b>ポスト</span>
         <span><b>${all.filter(PF_FILTERS.media).length.toLocaleString()}</b>メディア</span>
         <span><b>${all.filter(PF_FILTERS.likes).length.toLocaleString()}</b>いいね</span>
       </div>
