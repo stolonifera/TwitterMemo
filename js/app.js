@@ -9,7 +9,7 @@ import {
   blobToDataUrl, formatBytes, localStamp, dayKey,
 } from './util.js';
 
-export const APP_VERSION = '1.2.1';
+export const APP_VERSION = '1.3.0';
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -40,6 +40,7 @@ const I = {
   repost: '<svg viewBox="0 0 24 24"><path d="M7 17V8a2 2 0 0 1 2-2h9M15 3l3 3-3 3M17 7v9a2 2 0 0 1-2 2H6M9 21l-3-3 3-3"/></svg>',
   chevD: '<svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>',
   chevR: '<svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>',
+  pinPost: '<svg viewBox="0 0 24 24"><path d="M9 3h6l-1 6 4 4H6l4-4zM12 13v8"/></svg>',
 };
 
 const DEFAULT_PROFILE = { name: '自分', handle: 'me', avatar: null, banner: null, bio: '', location: '', website: '' };
@@ -264,9 +265,12 @@ function postHtml(p, ctx) {
     ? `<div class="replyto">返信先: ${parent && !parent.deleted
         ? `<a href="#/post/${esc(parent.id)}">${esc(parent.text.slice(0, 40) || '(画像)')}</a>`
         : '削除された投稿'}</div>` : '';
+  const pinned = ctx.pinnedId && ctx.pinnedId === p.id
+    ? `<div class="pinned-label">${I.pinPost}<span>固定されたポスト</span></div>` : '';
   return `<article class="post ${ctx.cls || ''}" data-act="open" data-id="${esc(p.id)}">
     <div class="avatar-col" data-act="profile">${avatarHtml()}</div>
     <div class="body">
+      ${pinned}
       <div class="meta"><b>${esc(profile.name)}</b><span class="handle">@${esc(profile.handle)}</span><span>·</span><time data-t="${esc(p.createdAt)}" title="${esc(fullTime(p.createdAt))}">${relTime(p.createdAt)}</time></div>
       ${replyTo}
       ${p.text ? `<div class="text">${renderText(p.text)}</div>` : ''}
@@ -544,13 +548,21 @@ async function openViewer(postId, idx) {
 async function postMenu(id) {
   const p = await db.getPost(id);
   if (!p) return;
+  const isPinned = profile.pinnedId === id;
   const choice = await actionSheet([
     { label: '編集', value: 'edit', icon: I.edit, kb: () => openComposer({ editId: id }) },
+    { label: isPinned ? '固定を解除' : 'プロフィールに固定する', value: 'pin', icon: I.pinPost },
     { label: 'テキストをコピー', value: 'copy', icon: I.copy },
     ...(extractUrls(p.text).length ? [{ label: 'リンク情報を再取得', value: 'refetch', icon: I.link }] : []),
     { label: '削除', value: 'delete', icon: I.trash, danger: true },
   ]);
   if (choice === 'edit') openComposer({ editId: id });
+  if (choice === 'pin') {
+    await saveProfile({ ...profile, pinnedId: isPinned ? null : id });
+    toast(isPinned ? '固定を解除しました' : 'プロフィールに固定しました',
+      isPinned ? null : { label: '表示', run: () => go('#/profile') });
+    softRender();
+  }
   if (choice === 'copy') {
     try { await navigator.clipboard.writeText(p.text); toast('コピーしました'); }
     catch { toast('コピーできませんでした'); }
@@ -563,6 +575,7 @@ async function postMenu(id) {
   if (choice === 'delete') {
     if (!confirm('この投稿を削除しますか？')) return;
     await P.deletePost(id);
+    if (profile.pinnedId === id) await saveProfile({ ...profile, pinnedId: null });
     toast('削除しました');
     if (route.name === 'post' && route.params.id === id) history.back();
   }
@@ -1053,7 +1066,11 @@ async function renderProfile(params) {
   setChrome({ title: profile.name, subtitle: `${all.length.toLocaleString()} 件のポスト`, back: true });
 
   const banner = profile.banner ? ` style="background-image:url('${profile.banner}')"` : '';
-  const body = list.length ? await listHtml(list.slice(0, 200)) : `<div class="empty"><p>${PF_EMPTY[tab]}</p></div>`;
+  // 「ポスト」タブでは、固定したポストを先頭に表示する
+  const pinnedPost = tab === 'posts' && profile.pinnedId ? all.find(p => p.id === profile.pinnedId) : null;
+  const shown = pinnedPost ? [pinnedPost, ...list.filter(p => p.id !== pinnedPost.id)] : list;
+  const body = shown.length ? await listHtml(shown.slice(0, 200), { pinnedId: pinnedPost?.id })
+    : `<div class="empty"><p>${PF_EMPTY[tab]}</p></div>`;
   view.innerHTML = `
     <div class="pf-banner"${banner}></div>
     <div class="pf-top">${avatarHtml()}<button class="btn ghost sm" id="pfEdit">プロフィールを編集</button></div>

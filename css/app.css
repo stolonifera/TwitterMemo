@@ -137,6 +137,8 @@ main { padding-bottom: calc(var(--tabbar-h) + var(--safe-b) + 90px); outline: no
 .post .meta b { color: var(--fg); font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 50%; }
 .post .meta .handle { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .post .meta time { white-space: nowrap; flex: none; }
+.post .pinned-label { display: flex; align-items: center; gap: 4px; color: var(--fg-2); font-size: .8em; font-weight: 700; margin-bottom: 2px; }
+.post .pinned-label svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .post .replyto { color: var(--fg-2); font-size: .85em; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .post .replyto a { color: var(--accent); }
 .post .text { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; margin-top: 2px; }
