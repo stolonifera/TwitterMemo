@@ -9,7 +9,7 @@ import {
   blobToDataUrl, formatBytes, localStamp, dayKey,
 } from './util.js';
 
-export const APP_VERSION = '1.3.0';
+export const APP_VERSION = '1.4.0';
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -745,17 +745,129 @@ async function renderSearchResults(q, day) {
   const box = $('#results');
   if (!box) return;
   if (!q.trim() && !day) {
-    const tags = await P.tagStats();
-    box.innerHTML = tags.length
-      ? `<div class="section-title">ハッシュタグ</div><div class="chips">${tags.map(([t, n]) =>
-          `<a class="chip" href="#/search?q=${encodeURIComponent('#' + t)}">#${esc(t)}<small>${n}</small></a>`).join('')}</div>`
+    const [tags, counts] = await Promise.all([P.tagStats(), P.dayCounts()]);
+    const parts = [];
+    if (tags.length) parts.push(`<div class="section-title">ハッシュタグ</div><div class="chips">${tags.map(([t, n]) =>
+      `<a class="chip" href="#/search?q=${encodeURIComponent('#' + t)}">#${esc(t)}<small>${n}</small></a>`).join('')}</div>`);
+    if (counts.size) parts.push(heatmapHtml(counts));
+    box.innerHTML = parts.length ? parts.join('')
       : `<div class="empty"><p>キーワードや <b>#タグ</b>、日付で投稿を探せます。</p></div>`;
+    bindHeatmap(box);
     return;
   }
   const results = await P.search({ q, day: day || null });
   box.innerHTML = `<div class="result-count">${results.length} 件</div>` +
     (results.length ? await listHtml(results.slice(0, 300)) : '<div class="empty"><p>見つかりませんでした</p></div>');
   hydrateImages(box);
+}
+
+// ---------- 投稿数のヒートマップ ----------
+// GitHub の草と同じ形：1 列 = 1 週（日曜はじまり）、右端が今日を含む週
+const HM_WEEKS = 53;
+const HM_WDAYS = ['', '月', '', '水', '', '金', ''];
+
+// 件数 → 濃さ（0〜4）。その期間の最多の日を 4 として割り振る
+function heatLevel(n, max) {
+  if (!n) return 0;
+  if (max <= 4) return Math.min(n, 4);
+  return Math.min(4, Math.ceil(n / (max / 4)));
+}
+
+function heatmapHtml(counts) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const end = new Date(today); end.setDate(end.getDate() + (6 - end.getDay())); // 今週の土曜
+  const start = new Date(end); start.setDate(start.getDate() - (HM_WEEKS * 7 - 1));
+
+  // セルは「列ごとに上から下」の順に並べる（grid-auto-flow: column に合わせる）
+  const cells = [];
+  for (let w = 0; w < HM_WEEKS; w++) {
+    for (let dow = 0; dow < 7; dow++) {
+      const d = new Date(start); d.setDate(start.getDate() + w * 7 + dow);
+      const k = dayKey(d);
+      cells.push({ k, n: counts.get(k) || 0, future: d > today });
+    }
+  }
+  const max = cells.reduce((m, c) => Math.max(m, c.n), 0);
+  const total = cells.reduce((t, c) => t + c.n, 0);
+
+  // 月ラベル：月が変わる週から、次の変わり目までの幅で置く（狭すぎる所は省く）
+  const months = [];
+  for (let w = 0; w < HM_WEEKS; w++) {
+    const d = new Date(start); d.setDate(start.getDate() + w * 7);
+    const m = d.getMonth();
+    const last = months[months.length - 1];
+    if (last && last.m === m) last.to = w + 1;
+    else months.push({ m, from: w, to: w + 1 });
+  }
+
+  return `<div class="section-title">投稿数</div>
+    <div class="heatmap">
+      <div class="hm-scroll">
+        <div class="hm-inner">
+          <span class="hm-corner"></span>
+          <div class="hm-months" style="grid-template-columns:repeat(${HM_WEEKS},calc(var(--hm-cell) + var(--hm-gap)))">${months.map(({ m, from, to }) => to - from >= 3
+            ? `<span style="grid-column:${from + 1}/${to + 1}">${m + 1}月</span>` : '').join('')}</div>
+          <div class="hm-wdays">${HM_WDAYS.map(w => `<span>${w}</span>`).join('')}</div>
+          <div class="hm-grid">${cells.map(c => c.future
+            ? '<div class="hm-cell out"></div>'
+            : `<div class="hm-cell" role="button" data-day="${c.k}" data-n="${c.n}" data-l="${heatLevel(c.n, max)}" aria-label="${c.k} ${c.n} 件"></div>`).join('')}</div>
+        </div>
+      </div>
+      <div class="hm-tip" hidden></div>
+      <div class="hm-foot">
+        <span>直近 1 年で ${total} 件</span>
+        <span class="hm-legend">少${[0, 1, 2, 3, 4].map(l => `<i class="hm-cell" data-l="${l}"></i>`).join('')}多</span>
+      </div>
+    </div>`;
+}
+
+// タップでその日に絞り込み、長押し（スマホ）やホバー（PC）で件数を表示
+function bindHeatmap(box) {
+  const hm = $('.heatmap', box);
+  if (!hm) return;
+  const tip = $('.hm-tip', hm), scroll = $('.hm-scroll', hm);
+  // 今日が見えるよう右端から。幅が確定しきる前だと寄り切らないので描画後にもう一度
+  const toEnd = () => { scroll.scrollLeft = scroll.scrollWidth; };
+  toEnd();
+  requestAnimationFrame(toEnd);
+
+  let timer = null, longPressed = false;
+  const hide = () => { tip.hidden = true; };
+  const show = cell => {
+    const n = +cell.dataset.n;
+    const [, m, d] = cell.dataset.day.split('-').map(Number);
+    tip.textContent = `${m}月${d}日 ${n ? `${n} 件` : '投稿なし'}`;
+    tip.hidden = false;
+    const c = cell.getBoundingClientRect(), base = hm.getBoundingClientRect();
+    const x = c.left - base.left + c.width / 2 - tip.offsetWidth / 2;
+    tip.style.left = `${Math.min(Math.max(x, 4), base.width - tip.offsetWidth - 4)}px`;
+    tip.style.top = `${c.top - base.top - tip.offsetHeight - 6}px`;
+  };
+  const cellOf = e => e.target.closest('.hm-cell[data-day]');
+
+  hm.addEventListener('pointerover', e => {
+    const cell = cellOf(e);
+    if (cell && e.pointerType === 'mouse') show(cell);
+  });
+  hm.addEventListener('pointerout', e => { if (e.pointerType === 'mouse') hide(); });
+  hm.addEventListener('pointerdown', e => {
+    const cell = cellOf(e);
+    if (!cell || e.pointerType === 'mouse') return;
+    longPressed = false;
+    timer = setTimeout(() => { longPressed = true; show(cell); }, 400);
+  });
+  hm.addEventListener('pointerup', () => {
+    clearTimeout(timer);
+    if (longPressed) setTimeout(hide, 1600);
+  });
+  hm.addEventListener('pointercancel', () => { clearTimeout(timer); hide(); });
+  scroll.addEventListener('scroll', () => { clearTimeout(timer); hide(); });
+  hm.addEventListener('click', e => {
+    const cell = cellOf(e);
+    if (!cell) return;
+    if (longPressed) { longPressed = false; return; } // 長押しは件数表示だけ
+    go(`#/search?day=${cell.dataset.day}`);
+  });
 }
 
 // ---------- いいね ----------

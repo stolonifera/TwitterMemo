@@ -1,6 +1,6 @@
 // 投稿の作成・編集・削除などのドメイン操作
 import * as db from './db.js';
-import { uuid, nowIso, compressImage } from './util.js';
+import { uuid, nowIso, compressImage, dayKey } from './util.js';
 
 export const bus = new EventTarget();
 export const emit = (type, detail) => bus.dispatchEvent(new CustomEvent(type, { detail }));
@@ -138,6 +138,19 @@ export async function search({ q = '', day = null, likedOnly = false }) {
       return terms.every(t => text.includes(t));
     })
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+// 日ごとの投稿数。返信・引用も 1 件として数え、削除済みは除く
+// 戻り値は Map<'YYYY-MM-DD', 件数>
+export async function dayCounts() {
+  const all = await db.allPosts();
+  const counts = new Map();
+  for (const p of all) {
+    if (p.deleted) continue;
+    const k = dayKey(p.createdAt);
+    counts.set(k, (counts.get(k) || 0) + 1);
+  }
+  return counts;
 }
 
 export async function tagStats(limit = 30) {
